@@ -65,7 +65,7 @@ export async function analyzeFoodImage(base64Image: string): Promise<FoodAnalysi
             ],
           },
         ],
-        max_tokens: 1024,
+        max_tokens: 400,
         temperature: 0.1,
         top_p: 1,
       }),

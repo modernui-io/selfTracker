@@ -4,33 +4,18 @@ type DraftFoodItem = Partial<FoodAnalysisFoodItem> & {
   name?: string;
 };
 
-export const FOOD_ANALYSIS_PROMPT = `Analyze this food image and return only valid JSON.
+export const FOOD_ANALYSIS_PROMPT = `Return one JSON object only.
+
+No prose. No markdown. No bullets. No explanation.
+
+Schema:
+{"foods":[{"name":"Food name","quantity":1,"unit":"g/ml/cup/piece/etc","estimatedGrams":120,"calories":200,"protein":10,"carbs":15,"fat":8,"detectionConfidence":0.82}]}
 
 Rules:
 - Detect each visible food item separately.
-- Prefer conservative estimates over overconfident guesses.
-- Estimate portion size as carefully as possible from the image.
-- Include estimatedGrams whenever possible.
-- detectionConfidence must be a number between 0 and 1 based on visual certainty.
-- If a value is uncertain, still provide your best estimate but keep detectionConfidence lower.
-
-Return this exact shape:
-{
-  "foods": [
-    {
-      "name": "Food name",
-      "quantity": 1,
-      "unit": "g/ml/cup/piece/etc",
-      "estimatedGrams": 120,
-      "calories": 200,
-      "protein": 10,
-      "carbs": 15,
-      "fat": 8,
-      "detectionConfidence": 0.82
-    }
-  ]
-}
-`;
+- Use conservative estimates.
+- detectionConfidence must be between 0 and 1.
+- If no food is visible, return {"foods":[]}.`;
 
 function previewContent(content: string, maxLength = 200): string {
   const normalized = content.replace(/\s+/g, " ").trim();
@@ -109,6 +94,65 @@ function extractBalancedJsonObject(content: string): string | null {
   return null;
 }
 
+function extractLabeledNumber(segment: string, label: string): number | undefined {
+  const escapedLabel = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = segment.match(new RegExp(`${escapedLabel}\\s*:\\s*([-+]?\\d*\\.?\\d+)`, "i"));
+  if (!match) return undefined;
+
+  const value = Number(match[1]);
+  return Number.isFinite(value) ? value : undefined;
+}
+
+function extractLabeledText(segment: string, label: string): string | undefined {
+  const escapedLabel = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = segment.match(new RegExp(`${escapedLabel}\\s*:\\s*([^+\\n\\r]+)`, "i"));
+  const value = match?.[1]?.trim();
+  return value ? value : undefined;
+}
+
+function parseNarrativeFoodItems(content: string): DraftFoodItem[] {
+  const normalized = content
+    .replace(/\r/g, "\n")
+    .replace(/[•●]/g, "*")
+    .replace(/\n+/g, "\n");
+
+  const marker = /(?:here is the list of detected foods|detected foods|foods detected)\s*:/i;
+  const afterMarker = marker.test(normalized)
+    ? normalized.slice(normalized.search(marker)).replace(marker, "")
+    : normalized;
+
+  const segments = afterMarker
+    .split(/\n\s*\*\s+|\s+\*\s+|(?:^|\n)\s*-\s+/)
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+
+  return segments
+    .map((segment): DraftFoodItem | null => {
+      const cleanedSegment = segment.replace(/\s+/g, " ").trim();
+      const name = cleanedSegment
+        .split(/\s+\+\s+|(?:^| )Quantity\s*:/i)[0]
+        ?.replace(/^[-*]\s*/, "")
+        .trim();
+
+      if (!name || /^the image shows/i.test(name) || /^here is/i.test(name)) {
+        return null;
+      }
+
+      return {
+        name,
+        quantity: extractLabeledNumber(cleanedSegment, "Quantity"),
+        unit: extractLabeledText(cleanedSegment, "Unit"),
+        estimatedGrams: extractLabeledNumber(cleanedSegment, "Estimated Grams"),
+        calories: extractLabeledNumber(cleanedSegment, "Calories"),
+        protein: extractLabeledNumber(cleanedSegment, "Protein"),
+        carbs: extractLabeledNumber(cleanedSegment, "Carbs"),
+        fat: extractLabeledNumber(cleanedSegment, "Fat"),
+        detectionConfidence: extractLabeledNumber(cleanedSegment, "Detection Confidence"),
+      };
+    })
+    .filter((item): item is DraftFoodItem => item !== null);
+}
+
 function toFiniteNumber(value: unknown, fallback = 0): number {
   const parsed = typeof value === "number" ? value : Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
@@ -127,6 +171,11 @@ export function extractJsonObject(content: string): string {
 
   const balanced = extractBalancedJsonObject(content);
   if (balanced) return balanced;
+
+  const parsedNarrativeFoods = parseNarrativeFoodItems(content);
+  if (parsedNarrativeFoods.length) {
+    return JSON.stringify({ foods: parsedNarrativeFoods });
+  }
 
   throw new Error(`Failed to extract JSON from model response. Preview: ${previewContent(content)}`);
 }
